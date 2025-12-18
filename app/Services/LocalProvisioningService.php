@@ -138,7 +138,7 @@ class LocalProvisioningService
     public function addToHosts(string $domain): bool
     {
         // Check if already exists
-        $checkCommand = sprintf('grep -q "%s" /etc/hosts', $domain);
+        $checkCommand = sprintf('grep -F -q %s /etc/hosts', escapeshellarg($domain));
         $check = $this->execute($checkCommand);
         
         if ($check['success']) {
@@ -146,20 +146,37 @@ class LocalProvisioningService
             return true;
         }
 
-        // Add new entry
-        $hostsEntry = "127.0.0.1\t{$domain}";
-        $command = sprintf(
-            'echo %s | sudo tee -a /etc/hosts',
-            escapeshellarg($hostsEntry)
-        );
+        // Use temp file strategy to avoid prompts with sudo tee
+        $tempFile = tempnam(sys_get_temp_dir(), 'hosts_');
         
-        $result = $this->execute($command);
+        // Copy current hosts
+        if (!copy('/etc/hosts', $tempFile)) {
+            Log::error("Failed to copy /etc/hosts to temp file");
+            return false;
+        }
+
+        // Append new entry
+        $hostsEntry = "\n127.0.0.1\t{$domain}";
+        file_put_contents($tempFile, $hostsEntry, FILE_APPEND);
+
+        // Move into place with sudo using allowed commands
+        $commands = [
+            "chown root:root {$tempFile}",
+            "chmod 644 {$tempFile}",
+            "mv {$tempFile} /etc/hosts"
+        ];
         
-        if ($result['success']) {
-            Log::info("Added {$domain} to /etc/hosts");
+        foreach ($commands as $cmd) {
+            $result = $this->executeSudo($cmd);
+            if (!$result['success']) {
+                Log::error("Failed to update hosts file: " . $result['output']);
+                return false;
+            }
         }
         
-        return $result['success'];
+        Log::info("Added {$domain} to /etc/hosts");
+        
+        return true;
     }
 
     /**
@@ -167,9 +184,18 @@ class LocalProvisioningService
      */
     public function removeFromHosts(string $domain): bool
     {
+        // Validate domain format for safety since we can't use escapeshellarg with sed regex
+        if (!preg_match('/^[a-z0-9.-]+$/i', $domain)) {
+            Log::error("Invalid domain for hosts removal: $domain");
+            return false;
+        }
+
+        // Escape dots for regex
+        $safeDomain = str_replace('.', '\.', $domain);
+
         $command = sprintf(
-            'sudo sed -i "/%s/d" /etc/hosts',
-            escapeshellarg($domain)
+            "sudo sed -i '/%s/d' /etc/hosts",
+            $safeDomain
         );
         
         $result = $this->execute($command);

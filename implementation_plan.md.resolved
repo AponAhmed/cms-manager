@@ -1,0 +1,564 @@
+# WordPress Provisioning System - Implementation Plan
+
+A Laravel 12 application that automatically provisions WordPress sites on a single EC2 instance using only AWS Free Tier resources.
+
+## User Review Required
+
+> [!IMPORTANT]
+> **AWS Free Tier Constraints**
+> - Single EC2 t2.micro/t3.micro instance only
+> - No RDS, Load Balancers, or NAT Gateways
+> - Local MySQL on EC2 (not AWS RDS)
+> - Route53 DNS management (charges apply after free tier)
+
+> [!WARNING]
+> **SSH & Credential Management**
+> - You'll need to provide SSH private key for EC2 access
+> - AWS credentials (Access Key ID/Secret) must be configured
+> - Consider using AWS Systems Manager Session Manager as alternative to SSH keys
+
+> [!IMPORTANT]
+> **Project Location**
+> - Where should this Laravel project be created? (e.g., `/home/apon/cms-manager`)
+> - Will use React + Inertia + shadcn/ui for the dashboard
+
+---
+
+## Proposed Changes
+
+### Component: Database Layer
+
+#### [NEW] [create_sites_table.php](file:///home/apon/cms-manager/database/migrations/2024_01_01_000001_create_sites_table.php)
+
+Migration for WordPress sites with columns:
+- `id`, `domain`, `status` (enum: pending, provisioning, live, failed, destroyed)
+- `wp_admin_username`, `wp_admin_password` (encrypted)
+- `db_name`, `db_username`, `db_password` (encrypted)
+- `ec2_path` (e.g., `/var/www/example.com`)
+- `public_ip`, `dns_record_id`
+- Timestamps for `provisioned_at`, `destroyed_at`
+
+#### [NEW] [create_provision_logs_table.php](file:///home/apon/cms-manager/database/migrations/2024_01_01_000002_create_provision_logs_table.php)
+
+Logs for each provisioning step:
+- `id`, `site_id` (foreign key)
+- `step` (e.g., "validate_domain", "install_wordpress")
+- `status` (pending, running, completed, failed)
+- `output` (text), `error` (text)
+- Timestamps
+
+#### [NEW] [create_configurations_table.php](file:///home/apon/cms-manager/database/migrations/2024_01_01_000003_create_configurations_table.php)
+
+System configuration:
+- `id`, `key`, `value` (encrypted for sensitive data)
+- Stores: EC2 IP, SSH key path, AWS credentials, MySQL root credentials
+
+#### [NEW] [Site.php](file:///home/apon/cms-manager/app/Models/Site.php)
+
+Eloquent model with:
+- Encrypted casts for `wp_admin_password`, `db_password`
+- Relationships to `ProvisionLog`
+- Scopes for status filtering
+- Accessors for status badge colors
+
+#### [NEW] [ProvisionLog.php](file:///home/apon/cms-manager/app/Models/ProvisionLog.php)
+
+Log model with:
+- `belongsTo` relationship to Site
+- Step enum/constants
+- Helper methods for logging
+
+#### [NEW] [Configuration.php](file:///home/apon/cms-manager/app/Models/Configuration.php)
+
+Configuration model with:
+- Encrypted value attribute
+- Static helper methods: `get()`, `set()`
+
+---
+
+### Component: Provisioning Job Queue
+
+Laravel queue jobs that run sequentially via job chaining:
+
+#### [NEW] [ValidateDomainJob.php](file:///home/apon/cms-manager/app/Jobs/ValidateDomainJob.php)
+
+- Check domain format
+- Verify DNS availability
+- Check if domain already exists in system
+- Log to provision_logs
+
+#### [NEW] [PrepareFilesystemJob.php](file:///home/apon/cms-manager/app/Jobs/PrepareFilesystemJob.php)
+
+- SSH to EC2
+- Create directory: `/var/www/{domain}`
+- Set proper ownership: `www-data:www-data`
+- Create directory structure: `public`, `logs`
+
+#### [NEW] [CreateDatabaseJob.php](file:///home/apon/cms-manager/app/Jobs/CreateDatabaseJob.php)
+
+- Generate unique DB name and username
+- Execute MySQL commands via SSH:
+  ```sql
+  CREATE DATABASE db_name;
+  CREATE USER 'db_user'@'localhost' IDENTIFIED BY 'secure_password';
+  GRANT ALL PRIVILEGES ON db_name.* TO 'db_user'@'localhost';
+  FLUSH PRIVILEGES;
+  ```
+- Store credentials (encrypted) in sites table
+
+#### [NEW] [InstallWordPressJob.php](file:///home/apon/cms-manager/app/Jobs/InstallWordPressJob.php)
+
+- SSH to EC2, navigate to site directory
+- Execute WP-CLI commands:
+  ```bash
+  wp core download
+  wp config create --dbname=db --dbuser=user --dbpass=pass
+  wp core install --url=domain --title="Site" --admin_user=admin --admin_password=pass --admin_email=email
+  wp plugin delete akismet hello
+  wp theme activate twentytwentyfour
+  wp option update default_ping_status 0
+  wp option update default_pingback_flag 0
+  ```
+
+#### [NEW] [ConfigureNginxJob.php](file:///home/apon/cms-manager/app/Jobs/ConfigureNginxJob.php)
+
+- Generate Nginx vhost config from template
+- Upload via SSH to `/etc/nginx/sites-available/{domain}.conf`
+- Create symlink to `sites-enabled`
+- Test config: `nginx -t`
+
+#### [NEW] [ReloadNginxJob.php](file:///home/apon/cms-manager/app/Jobs/ReloadNginxJob.php)
+
+- Execute: `systemctl reload nginx`
+- Verify reload success
+- Handle errors
+
+#### [NEW] [UpdateDnsJob.php](file:///home/apon/cms-manager/app/Jobs/UpdateDnsJob.php)
+
+- Use AWS SDK Route53 client
+- Create A record pointing to EC2 public IP
+- Store `dns_record_id` for later cleanup
+- Wait for DNS propagation (configurable timeout)
+
+#### [NEW] [VerifySiteJob.php](file:///home/apon/cms-manager/app/Jobs/VerifySiteJob.php)
+
+- HTTP request to domain
+- Check for WordPress indicators
+- Update site status to `live` or `failed`
+- Send notification (optional)
+
+#### [NEW] [ProvisionWordPressSite.php](file:///home/apon/cms-manager/app/Jobs/ProvisionWordPressSite.php)
+
+Main orchestration job that chains all jobs:
+- Sets site status to `provisioning`
+- Chains jobs in order
+- Handles failures and rollback
+- Updates final status
+
+---
+
+### Component: Cleanup & Destroy Service
+
+#### [NEW] [DestroyWordPressSite.php](file:///home/apon/cms-manager/app/Jobs/DestroyWordPressSite.php)
+
+Cleanup job that:
+1. Removes Nginx config (`rm /etc/nginx/sites-enabled/{domain}.conf`)
+2. Reloads Nginx
+3. Deletes WordPress files (`rm -rf /var/www/{domain}`)
+4. Drops database and user:
+   ```sql
+   DROP DATABASE db_name;
+   DROP USER 'db_user'@'localhost';
+   ```
+5. Deletes Route53 DNS record via AWS SDK
+6. Updates site status to `destroyed`
+7. Logs all cleanup steps
+
+---
+
+### Component: Shell Script Templates
+
+#### [NEW] [nginx-vhost.blade.php](file:///home/apon/cms-manager/resources/templates/nginx-vhost.blade.php)
+
+Blade template for Nginx virtual host:
+```nginx
+server {
+    listen 80;
+    server_name {{ $domain }};
+    root /var/www/{{ $domain }}/public;
+    
+    index index.php;
+    
+    location / {
+        try_files $uri $uri/ /index.php?$args;
+    }
+    
+    location ~ \.php$ {
+        fastcgi_pass unix:/var/run/php/php-fpm.sock;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+    }
+    
+    location ~ /\.ht {
+        deny all;
+    }
+}
+```
+
+#### [NEW] [SshService.php](file:///home/apon/cms-manager/app/Services/SshService.php)
+
+Service class for SSH operations:
+- Connect to EC2 using phpseclib3
+- Execute commands with error handling
+- Return output and exit codes
+- Support for file uploads (SCP)
+
+#### [NEW] [Route53Service.php](file:///home/apon/cms-manager/app/Services/Route53Service.php)
+
+AWS Route53 DNS management:
+- Create A records
+- Delete records by ID
+- List hosted zones
+- Uses AWS SDK for PHP
+
+---
+
+### Component: Controllers & Routes
+
+#### [NEW] [SiteController.php](file:///home/apon/cms-manager/app/Http/Controllers/SiteController.php)
+
+RESTful controller:
+- `index()` - List all sites
+- `create()` - Show creation form
+- `store()` - Dispatch ProvisionWordPressSite job
+- `show($id)` - Show site details and logs
+- `destroy($id)` - Dispatch DestroyWordPressSite job
+
+#### [MODIFY] [web.php](file:///home/apon/cms-manager/routes/web.php)
+
+Add routes:
+```php
+Route::resource('sites', SiteController::class);
+Route::get('/sites/{site}/logs', [SiteController::class, 'logs']);
+```
+
+---
+
+### Component: Frontend Dashboard (React + Inertia + shadcn/ui)
+
+#### [NEW] [Sites/Index.tsx](file:///home/apon/cms-manager/resources/js/Pages/Sites/Index.tsx)
+
+Site list view:
+- Data table with columns: Domain, Status, Created, Actions
+- Status badges (pending: gray, provisioning: blue, live: green, failed: red, destroyed: yellow)
+- "Provision New Site" button
+- Delete button with confirmation
+- Real-time status updates (optional: polling or WebSockets)
+
+#### [NEW] [Sites/Create.tsx](file:///home/apon/cms-manager/resources/js/Pages/Sites/Create.tsx)
+
+Site creation form:
+- Domain input with validation
+- WordPress admin username/email/password
+- Domain availability indicator (API check)
+- Submit triggers provisioning job
+
+#### [NEW] [Sites/Show.tsx](file:///home/apon/cms-manager/resources/js/Pages/Sites/Show.tsx)
+
+Site details with provision logs:
+- Site information card
+- Timeline/accordion of provision steps
+- Log output per step
+- Error messages if failed
+- Retry button (if failed)
+- Delete site button
+
+#### [NEW] [components/ui/*](file:///home/apon/cms-manager/resources/js/components/ui)
+
+shadcn/ui components:
+- Button, Badge, Card, Table, Dialog, Form, Input, Alert, Accordion
+- Install via shadcn CLI
+
+---
+
+### Component: Configuration & Environment
+
+#### [MODIFY] [.env.example](file:///home/apon/cms-manager/.env.example)
+
+Add variables:
+```env
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_DEFAULT_REGION=us-east-1
+AWS_ROUTE53_HOSTED_ZONE_ID=
+
+EC2_PUBLIC_IP=
+EC2_SSH_KEY_PATH=/path/to/key.pem
+EC2_SSH_USER=ec2-user
+
+MYSQL_ROOT_PASSWORD=
+WP_ADMIN_EMAIL=admin@example.com
+
+QUEUE_CONNECTION=database
+```
+
+#### [NEW] [config/wordpress.php](file:///home/apon/cms-manager/config/wordpress.php)
+
+WordPress provisioning config:
+```php
+return [
+    'ec2' => [
+        'ip' => env('EC2_PUBLIC_IP'),
+        'ssh_key' => env('EC2_SSH_KEY_PATH'),
+        'ssh_user' => env('EC2_SSH_USER', 'ec2-user'),
+    ],
+    'mysql' => [
+        'root_password' => env('MYSQL_ROOT_PASSWORD'),
+    ],
+    'paths' => [
+        'base' => '/var/www',
+        'nginx_available' => '/etc/nginx/sites-available',
+        'nginx_enabled' => '/etc/nginx/sites-enabled',
+    ],
+    'defaults' => [
+        'wp_admin_email' => env('WP_ADMIN_EMAIL'),
+    ],
+];
+```
+
+---
+
+## EC2 Preparation Checklist
+
+Complete these steps on your AWS EC2 instance before using the system:
+
+### 1. Launch EC2 Instance
+- AMI: Amazon Linux 2023
+- Instance type: t2.micro (Free Tier eligible)
+- Security group:
+  - Port 22 (SSH) from your IP
+  - Port 80 (HTTP) from 0.0.0.0/0
+  - Port 443 (HTTPS) from 0.0.0.0/0 (for future SSL)
+- Allocate Elastic IP (within Free Tier limits)
+
+### 2. Install Software Stack
+
+```bash
+# Update system
+sudo dnf update -y
+
+# Install Nginx
+sudo dnf install nginx -y
+sudo systemctl enable nginx
+sudo systemctl start nginx
+
+# Install PHP 8.2 and extensions
+sudo dnf install php8.2 php8.2-fpm php8.2-mysqlnd php8.2-cli php8.2-xml php8.2-mbstring php8.2-curl php8.2-zip php8.2-gd -y
+sudo systemctl enable php-fpm
+sudo systemctl start php-fpm
+
+# Install MariaDB
+sudo dnf install mariadb105-server -y
+sudo systemctl enable mariadb
+sudo systemctl start mariadb
+sudo mysql_secure_installation
+
+# Install WP-CLI
+curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+chmod +x wp-cli.phar
+sudo mv wp-cli.phar /usr/local/bin/wp
+
+# Create sites directory
+sudo mkdir -p /var/www
+sudo chown -R www-data:www-data /var/www
+```
+
+### 3. Configure Nginx
+
+Create directory structure:
+```bash
+sudo mkdir -p /etc/nginx/sites-available
+sudo mkdir -p /etc/nginx/sites-enabled
+```
+
+Edit `/etc/nginx/nginx.conf` to include sites-enabled:
+```nginx
+http {
+    ...
+    include /etc/nginx/sites-enabled/*.conf;
+}
+```
+
+### 4. Configure PHP-FPM
+
+Edit `/etc/php-fpm.d/www.conf`:
+```ini
+user = www-data
+group = www-data
+listen = /var/run/php/php-fpm.sock
+```
+
+Create socket directory:
+```bash
+sudo mkdir -p /var/run/php
+sudo chown www-data:www-data /var/run/php
+```
+
+### 5. Set Up SSH Key Access
+
+From your Laravel server:
+```bash
+ssh-keygen -t rsa -b 4096 -f ~/.ssh/ec2_wordpress
+ssh-copy-id -i ~/.ssh/ec2_wordpress.pub ec2-user@EC2_PUBLIC_IP
+```
+
+Test connection:
+```bash
+ssh -i ~/.ssh/ec2_wordpress ec2-user@EC2_PUBLIC_IP
+```
+
+### 6. Configure Route53
+
+- Create hosted zone for your domain
+- Note the Hosted Zone ID
+- Update nameservers at your domain registrar
+
+---
+
+## Security Best Practices
+
+### 1. Laravel Encryption
+
+Use Laravel's encryption for sensitive data:
+
+```php
+// In Site model
+protected $casts = [
+    'wp_admin_password' => 'encrypted',
+    'db_password' => 'encrypted',
+];
+```
+
+### 2. SSH Key Management
+
+- Store SSH private key outside web root
+- Set permissions: `chmod 600 /path/to/key.pem`
+- Never commit keys to version control
+- Add to `.gitignore`:
+  ```
+  *.pem
+  *.key
+  ec2_*
+  ```
+
+### 3. AWS Credentials
+
+- Use IAM user with minimal permissions:
+  - Route53: Full access to specific hosted zone only
+  - EC2: Read-only (for fetching instance info)
+- Enable MFA on IAM user
+- Rotate credentials regularly
+
+### 4. Database Security
+
+- Use strong MySQL root password
+- Generate random passwords for WP DB users (min 32 chars)
+- Never reuse credentials across sites
+- Limit MySQL to localhost only
+
+### 5. WordPress Hardening
+
+Automated in WP-CLI script:
+- Disable XML-RPC: `add_filter('xmlrpc_enabled', '__return_false');`
+- Remove default plugins (Akismet, Hello Dolly)
+- Set strong admin password
+- Disable file editing: `define('DISALLOW_FILE_EDIT', true);`
+
+### 6. Nginx Security
+
+- Disable directory listing
+- Block access to sensitive files (`.htaccess`, `wp-config.php`)
+- Set file upload limits
+- Enable rate limiting
+
+### 7. Validation & Sanitization
+
+```php
+// In Store Site Request
+$validated = $request->validate([
+    'domain' => ['required', 'string', 'regex:/^[a-z0-9.-]+$/i', 'unique:sites'],
+    'wp_admin_username' => ['required', 'string', 'alpha_dash', 'min:3'],
+    'wp_admin_email' => ['required', 'email'],
+]);
+```
+
+---
+
+## Verification Plan
+
+### Automated Tests
+
+1. **Database Tests**
+   ```bash
+   php artisan test --filter=SiteModelTest
+   php artisan test --filter=ProvisionLogTest
+   ```
+
+2. **Job Tests**
+   ```bash
+   php artisan test --filter=ProvisioningJobsTest
+   ```
+
+3. **Integration Test**
+   - Create test site via API
+   - Monitor job queue
+   - Verify database records
+   - Check SSH commands executed
+   - Verify site responds on domain
+
+### Manual Verification
+
+1. **Complete Provisioning Flow**
+   - Create new site via dashboard
+   - Watch provision logs in real-time
+   - Verify site becomes `live`
+   - Visit domain and see WordPress
+   - Login to WP admin
+
+2. **Destroy Flow**
+   - Delete site via dashboard
+   - Verify Nginx config removed
+   - Verify WordPress files deleted
+   - Verify database dropped
+   - Verify DNS record removed
+
+3. **Error Handling**
+   - Test with invalid domain
+   - Test with duplicate domain
+   - Test with SSH connection failure
+   - Verify status changes to `failed`
+   - Verify error logged correctly
+
+4. **AWS Free Tier Compliance**
+   - Monitor EC2 usage (single instance)
+   - Verify no RDS instances created
+   - Verify no load balancers
+   - Check Route53 query limits
+
+---
+
+## Next Steps
+
+Once approved:
+
+1. Set up Laravel 12 project with React + Inertia
+2. Install dependencies (AWS SDK, phpseclib3, shadcn/ui)
+3. Create all database migrations and models
+4. Implement job queue pipeline
+5. Build SSH and Route53 services
+6. Create controllers and routes
+7. Build React dashboard components
+8. Write tests
+9. Provide EC2 setup guide
+10. Test complete workflow

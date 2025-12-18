@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Jobs;
+namespace App\Jobs\Aws;
 
 use App\Models\ProvisionLog;
 use App\Models\Site;

@@ -3,7 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Http\Requests\StoreSiteRequest;
-use App\Jobs\DestroyWordPressSite;
+use App\Jobs\Aws\DestroyWordPressSite;
 use App\Jobs\ProvisionWordPressSite;
 use App\Models\Site;
 use Inertia\Inertia;

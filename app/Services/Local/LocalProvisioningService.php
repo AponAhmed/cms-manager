@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Services;
+namespace App\Services\Local;
 
 use Illuminate\Support\Facades\Log;
 
@@ -193,18 +193,49 @@ class LocalProvisioningService
         // Escape dots for regex
         $safeDomain = str_replace('.', '\.', $domain);
 
-        $command = sprintf(
-            "sudo sed -i '/%s/d' /etc/hosts",
-            $safeDomain
-        );
+        // Read current hosts
+        $hostsContent = file_get_contents('/etc/hosts');
+        if ($hostsContent === false) {
+            Log::error("Failed to read /etc/hosts");
+            return false;
+        }
+
+        // Filter out lines containing the domain
+        $lines = explode("\n", $hostsContent);
+        $newLines = array_filter($lines, function ($line) use ($domain) {
+            return !str_contains($line, $domain);
+        });
+
+        // Check if anything changed
+        if (count($lines) === count($newLines)) {
+            Log::info("Domain {$domain} not found in /etc/hosts");
+            return true;
+        }
+
+        $newContent = implode("\n", $newLines);
+
+        // Usage temp file strategy
+        $tempFile = tempnam(sys_get_temp_dir(), 'hosts_rem_');
+        file_put_contents($tempFile, $newContent);
+
+        // Move into place with sudo using allowed commands
+        $commands = [
+            "chown root:root {$tempFile}",
+            "chmod 644 {$tempFile}",
+            "mv {$tempFile} /etc/hosts"
+        ];
         
-        $result = $this->execute($command);
-        
-        if ($result['success']) {
-            Log::info("Removed {$domain} from /etc/hosts");
+        foreach ($commands as $cmd) {
+            $result = $this->executeSudo($cmd);
+            if (!$result['success']) {
+                Log::error("Failed to update hosts file (removal): " . $result['output']);
+                return false;
+            }
         }
         
-        return $result['success'];
+        Log::info("Removed {$domain} from /etc/hosts");
+        
+        return true;
     }
 
     /**

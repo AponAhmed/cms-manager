@@ -4,14 +4,13 @@ namespace App\Jobs;
 
 use App\Models\ProvisionLog;
 use App\Models\Site;
-use App\Services\SshService;
+use App\Services\Aws\SshService;
+use App\Services\Local\LocalProvisioningService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-
-use App\Services\LocalProvisioningService;
 
 class ReloadNginxJob implements ShouldQueue
 {

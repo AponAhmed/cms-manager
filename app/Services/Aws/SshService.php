@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Services;
+namespace App\Services\Aws;
 
 use App\Models\Configuration;
 use phpseclib3\Net\SSH2;

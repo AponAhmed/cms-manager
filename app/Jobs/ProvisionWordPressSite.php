@@ -64,14 +64,14 @@ class ProvisionWordPressSite implements ShouldQueue
     private function getAwsJobs(Site $site): array
     {
         return [
-            new ValidateDomainJob($site),
-            new PrepareFilesystemJob($site),
-            new CreateDatabaseJob($site),
-            new InstallWordPressJob($site),
-            new ConfigureNginxJob($site),
+            new Aws\ValidateDomainJob($site),
+            new Aws\PrepareFilesystemJob($site),
+            new Aws\CreateDatabaseJob($site),
+            new Aws\InstallWordPressJob($site),
+            new Aws\ConfigureNginxJob($site),
             new ReloadNginxJob($site->id),
-            new UpdateDnsJob($site),
-            new VerifySiteJob($site),
+            new Aws\UpdateDnsJob($site),
+            new Aws\VerifySiteJob($site),
         ];
     }
 }

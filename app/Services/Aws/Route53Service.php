@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Services;
+namespace App\Services\Aws;
 
 use App\Models\Configuration;
 use Aws\Route53\Route53Client;

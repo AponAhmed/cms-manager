@@ -3,7 +3,7 @@
 namespace App\Jobs\Local;
 
 use App\Models\Site;
-use App\Services\LocalProvisioningService;
+use App\Services\Local\LocalProvisioningService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;

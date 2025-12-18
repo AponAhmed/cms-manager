@@ -1,10 +1,10 @@
 <?php
 
-namespace App\Jobs;
+namespace App\Jobs\Aws;
 
 use App\Models\ProvisionLog;
 use App\Models\Site;
-use App\Services\SshService;
+use App\Services\Aws\SshService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;

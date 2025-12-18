@@ -14,6 +14,7 @@ Route::get('/', function () {
 // Site management routes
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::resource('sites', SiteController::class)->except(['edit', 'update']);
+    Route::delete('sites/{site}/force', [SiteController::class, 'forceDelete'])->name('sites.force-delete');
     Route::get('sites/{site}/logs', [SiteController::class, 'logs'])->name('sites.logs');
 });
 

@@ -1,4 +1,5 @@
-import { Head, Link } from '@inertiajs/react';
+import { useState } from 'react';
+import { Head, Link, router } from '@inertiajs/react';
 import { AppLayout } from '@/layouts/app-layout';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -17,7 +18,24 @@ import {
     CardHeader,
     CardTitle,
 } from '@/components/ui/card';
-import { Plus, ExternalLink } from 'lucide-react';
+import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+    AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { Plus, ExternalLink, Eye, Trash2, XCircle } from 'lucide-react';
 
 interface Site {
     id: number;
@@ -43,6 +61,25 @@ const statusColorMap: Record<string, string> = {
 };
 
 export default function Index({ sites = [] }: Props) {
+    const [deletingSiteId, setDeletingSiteId] = useState<number | null>(null);
+    const [forceDeletingSiteId, setForceDeletingSiteId] = useState<number | null>(
+        null
+    );
+
+    const handleDelete = (siteId: number) => {
+        setDeletingSiteId(siteId);
+        router.delete(`/sites/${siteId}`, {
+            onFinish: () => setDeletingSiteId(null),
+        });
+    };
+
+    const handleForceDelete = (siteId: number) => {
+        setForceDeletingSiteId(siteId);
+        router.delete(`/sites/${siteId}/force`, {
+            onFinish: () => setForceDeletingSiteId(null),
+        });
+    };
+
     return (
         <AppLayout>
             <Head title="WordPress Sites" />
@@ -124,11 +161,88 @@ export default function Index({ sites = [] }: Props) {
                                                 {site.provisioned_at || '-'}
                                             </TableCell>
                                             <TableCell className="text-right">
-                                                <Link href={`/sites/${site.id}`}>
-                                                    <Button variant="outline" size="sm">
-                                                        View Logs
-                                                    </Button>
-                                                </Link>
+                                                <div className="flex justify-end gap-2">
+                                                    <Link href={`/sites/${site.id}`}>
+                                                        <Button variant="outline" size="sm">
+                                                            <Eye className="mr-2 h-4 w-4" />
+                                                            View
+                                                        </Button>
+                                                    </Link>
+
+                                                    <AlertDialog>
+                                                        <AlertDialogTrigger asChild>
+                                                            {site.status === 'destroyed' ? (
+                                                                <Button
+                                                                    variant="destructive"
+                                                                    size="sm"
+                                                                    title="Permanently Delete"
+                                                                    disabled={
+                                                                        forceDeletingSiteId === site.id
+                                                                    }
+                                                                >
+                                                                    <XCircle className="h-4 w-4" />
+                                                                </Button>
+                                                            ) : (
+                                                                <Button
+                                                                    variant="destructive"
+                                                                    size="sm"
+                                                                    disabled={deletingSiteId === site.id || site.status === 'destroyed'}
+                                                                    title="Destroy Site"
+                                                                >
+                                                                    <Trash2 className="h-4 w-4" />
+                                                                </Button>
+                                                            )}
+                                                        </AlertDialogTrigger>
+                                                        <AlertDialogContent>
+                                                            <AlertDialogHeader>
+                                                                <AlertDialogTitle>
+                                                                    {site.status === 'destroyed'
+                                                                        ? 'Permanently Delete Record?'
+                                                                        : 'Destroy Site?'}
+                                                                </AlertDialogTitle>
+                                                                <AlertDialogDescription>
+                                                                    {site.status === 'destroyed' ? (
+                                                                        <>
+                                                                            This will permanently
+                                                                            remove the record for{' '}
+                                                                            <strong>{site.domain}</strong>{' '}
+                                                                            from the database. The site
+                                                                            files have already been
+                                                                            destroyed.
+                                                                        </>
+                                                                    ) : (
+                                                                        <>
+                                                                            This will permanently delete{' '}
+                                                                            <strong>{site.domain}</strong>,
+                                                                            including all files, database,
+                                                                            and DNS records. This action
+                                                                            cannot be undone.
+                                                                        </>
+                                                                    )}
+                                                                </AlertDialogDescription>
+                                                            </AlertDialogHeader>
+                                                            <AlertDialogFooter>
+                                                                <AlertDialogCancel>
+                                                                    Cancel
+                                                                </AlertDialogCancel>
+                                                                <AlertDialogAction
+                                                                    onClick={() =>
+                                                                        site.status === 'destroyed'
+                                                                            ? handleForceDelete(
+                                                                                site.id
+                                                                            )
+                                                                            : handleDelete(site.id)
+                                                                    }
+                                                                    className="bg-red-600 hover:bg-red-700"
+                                                                >
+                                                                    {site.status === 'destroyed'
+                                                                        ? 'Permanently Delete'
+                                                                        : 'Destroy Site'}
+                                                                </AlertDialogAction>
+                                                            </AlertDialogFooter>
+                                                        </AlertDialogContent>
+                                                    </AlertDialog>
+                                                </div>
                                             </TableCell>
                                         </TableRow>
                                     ))}

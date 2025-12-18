@@ -14,7 +14,12 @@ import {
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { ArrowLeft, Loader2, CheckCircle2, XCircle } from 'lucide-react';
 
-export default function Create() {
+interface Props {
+    mode: 'local' | 'aws';
+    domainSuffix: string;
+}
+
+export default function Create({ mode = 'local', domainSuffix = '.test' }: Props) {
     const { data, setData, post, processing, errors } = useForm({
         domain: '',
         wp_admin_username: '',
@@ -71,8 +76,9 @@ export default function Create() {
                     <CardHeader>
                         <CardTitle>Provision New WordPress Site</CardTitle>
                         <CardDescription>
-                            Fill in the details below to automatically provision a new
-                            WordPress site on your EC2 instance
+                            {mode === 'local'
+                                ? 'Fill in the details below to provision a WordPress site on your local machine'
+                                : 'Fill in the details below to automatically provision a new WordPress site on your EC2 instance'}
                         </CardDescription>
                     </CardHeader>
                     <CardContent>
@@ -92,8 +98,9 @@ export default function Create() {
                                     <p className="text-sm text-red-500">{errors.domain}</p>
                                 )}
                                 <p className="text-xs text-muted-foreground">
-                                    Enter the full domain name (e.g., example.com or
-                                    subdomain.example.com)
+                                    {mode === 'local'
+                                        ? `Enter domain name (${domainSuffix} will be added automatically, e.g., mysite${domainSuffix})`
+                                        : 'Enter the full domain name (e.g., example.com or subdomain.example.com)'}
                                 </p>
                             </div>
 
@@ -192,9 +199,15 @@ export default function Create() {
                             {/* Info Alert */}
                             <Alert>
                                 <AlertDescription>
-                                    <strong>Note:</strong> Provisioning typically takes 3-5
-                                    minutes. You'll be redirected to the logs page to monitor
-                                    progress.
+                                    <strong>Note:</strong> Provisioning typically takes{' '}
+                                    {mode === 'local' ? '1-2' : '3-5'} minutes.{' '}
+                                    {mode === 'local' && 'Sites will be accessible locally at '}
+                                    {mode === 'local' && (
+                                        <code className="text-xs">http://[domain]{domainSuffix}</code>
+                                    )}
+                                    {mode === 'local'
+                                        ? ''
+                                        : "You'll be redirected to the logs page to monitor progress."}
                                 </AlertDescription>
                             </Alert>
 

@@ -15,27 +15,63 @@ class ProvisionWordPressSite implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public function __construct(
-        private Site $site
+        private int $siteId
     ) {}
 
     public function handle(): void
     {
+        $site = Site::find($this->siteId);
+        
+        if (!$site) {
+            return;
+        }
+
         // Mark site as provisioning
-        $this->site->markAsProvisioning();
+        $site->markAsProvisioning();
+
+        // Select jobs based on provisioning mode
+        $jobs = match (config('provisioning.mode')) {
+            'local' => $this->getLocalJobs($site),
+            'aws' => $this->getAwsJobs($site),
+            default => throw new \Exception('Invalid provisioning mode: ' . config('provisioning.mode')),
+        };
 
         // Chain all provisioning jobs in sequence
-        Bus::chain([
-            new ValidateDomainJob($this->site),
-            new PrepareFilesystemJob($this->site),
-            new CreateDatabaseJob($this->site),
-            new InstallWordPressJob($this->site),
-            new ConfigureNginxJob($this->site),
-            new ReloadNginxJob($this->site),
-            new UpdateDnsJob($this->site),
-            new VerifySiteJob($this->site),
-        ])->catch(function (\Throwable $e) {
+        $siteId = $this->siteId;
+        Bus::chain($jobs)->catch(function (\Throwable $e) use ($siteId) {
             // If any job fails, mark site as failed
-            $this->site->markAsFailed();
+            $site = Site::find($siteId);
+            if ($site) {
+                $site->markAsFailed();
+            }
         })->dispatch();
+    }
+
+    private function getLocalJobs(Site $site): array
+    {
+        return [
+            new Local\ValidateDomainJob($site->id),
+            new Local\PrepareFilesystemJob($site->id),
+            new Local\CreateDatabaseJob($site->id),
+            new Local\InstallWordPressJob($site->id),
+            new Local\ConfigureNginxJob($site->id),
+            new ReloadNginxJob($site->id), // Same for both modes
+            new Local\UpdateHostsJob($site->id),
+            new Local\VerifySiteJob($site->id),
+        ];
+    }
+
+    private function getAwsJobs(Site $site): array
+    {
+        return [
+            new ValidateDomainJob($site),
+            new PrepareFilesystemJob($site),
+            new CreateDatabaseJob($site),
+            new InstallWordPressJob($site),
+            new ConfigureNginxJob($site),
+            new ReloadNginxJob($site->id),
+            new UpdateDnsJob($site),
+            new VerifySiteJob($site),
+        ];
     }
 }

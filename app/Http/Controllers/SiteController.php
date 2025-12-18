@@ -43,7 +43,10 @@ class SiteController extends Controller
      */
     public function create(): Response
     {
-        return Inertia::render('Sites/Create');
+        return Inertia::render('Sites/Create', [
+            'mode' => config('provisioning.mode', 'local'),
+            'domainSuffix' => config('provisioning.local.domain_suffix', '.test'),
+        ]);
     }
 
     /**
@@ -52,6 +55,14 @@ class SiteController extends Controller
     public function store(StoreSiteRequest $request): RedirectResponse
     {
         $validated = $request->validated();
+
+        // Auto-append .test suffix for local mode
+        if (config('provisioning.mode') === 'local') {
+            $domain = $validated['domain'];
+            if (!str_ends_with($domain, '.test')) {
+                $validated['domain'] = $domain . '.test';
+            }
+        }
 
         // Create the site record
         $site = Site::create([
@@ -62,8 +73,9 @@ class SiteController extends Controller
             'status' => Site::STATUS_PENDING,
         ]);
 
+        // Dispatch the appropriate provisioning job
         // Dispatch the provisioning job
-        ProvisionWordPressSite::dispatch($site);
+        ProvisionWordPressSite::dispatch($site->id);
 
         return redirect()->route('sites.show', $site)
             ->with('success', 'Site provisioning started!');
@@ -109,17 +121,33 @@ class SiteController extends Controller
      */
     public function destroy(Site $site): RedirectResponse
     {
-        // Only allow destroying live or failed sites
-        if (!in_array($site->status, [Site::STATUS_LIVE, Site::STATUS_FAILED])) {
-            return redirect()->back()
-                ->with('error', 'Cannot destroy a site that is pending or provisioning');
-        }
 
-        // Dispatch the destroy job
-        DestroyWordPressSite::dispatch($site);
+
+        // Dispatch the appropriate destroy job based on mode
+        if (config('provisioning.mode') === 'local') {
+            \App\Jobs\Local\DestroyWordPressSite::dispatch($site->id);
+        } else {
+            DestroyWordPressSite::dispatch($site);
+        }
 
         return redirect()->route('sites.index')
             ->with('success', 'Site destruction started!');
+    }
+
+    /**
+     * Permanently delete a site record
+     */
+    public function forceDelete(Site $site): RedirectResponse
+    {
+        if ($site->status !== Site::STATUS_DESTROYED) {
+            return redirect()->back()
+                ->with('error', 'Only destroyed sites can be permanently deleted');
+        }
+
+        $site->delete();
+
+        return redirect()->route('sites.index')
+            ->with('success', 'Site record permanently deleted');
     }
 
     /**

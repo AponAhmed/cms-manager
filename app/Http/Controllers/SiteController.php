@@ -127,7 +127,7 @@ class SiteController extends Controller
         if (config('provisioning.mode') === 'local') {
             \App\Jobs\Local\DestroyWordPressSite::dispatch($site->id);
         } else {
-            DestroyWordPressSite::dispatch($site);
+            DestroyWordPressSite::dispatch($site->id);
         }
 
         return redirect()->route('sites.index')

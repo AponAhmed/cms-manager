@@ -17,27 +17,38 @@ class CreateDatabaseJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public function __construct(
-        private Site $site
+        private int $siteId
     ) {}
 
-    public function handle(SshService $ssh): void
+    public function handle(): void
     {
+        $site = Site::find($this->siteId);
+        
+        if (!$site) {
+            return;
+        }
+
         $log = ProvisionLog::create([
-            'site_id' => $this->site->id,
+            'site_id' => $site->id,
             'step' => ProvisionLog::STEP_CREATE_DATABASE,
             'status' => ProvisionLog::STATUS_RUNNING,
         ]);
 
         try {
+            $ssh = new SshService($site);
+            
             // Generate database name and user
-            $dbName = 'wp_' . str_replace(['.', '-'], '_', $this->site->domain);
+            $dbName = 'wp_' . str_replace(['.', '-'], '_', $site->domain);
             $dbName = substr($dbName, 0, 64); // MySQL limit
             
             $dbUser = 'wp_' . Str::random(8);
-            $dbPassword = Str::random(config('wordpress.security.min_password_length', 32));
+            $dbPassword = Str::random(config('aws.security.min_password_length', 32));
+
+            // Use the MySQL root password stored in the site
+            $rootPassword = $site->mysql_root_password;
 
             // Create database
-            $result = $ssh->executeMysql("CREATE DATABASE IF NOT EXISTS `{$dbName}`;");
+            $result = $ssh->executeMysql("CREATE DATABASE IF NOT EXISTS `{$dbName}`;", $rootPassword);
             
             if (!$result['success']) {
                 throw new \Exception('Failed to create database: ' . $result['output']);
@@ -45,7 +56,8 @@ class CreateDatabaseJob implements ShouldQueue
 
             // Create user
             $result = $ssh->executeMysql(
-                "CREATE USER '{$dbUser}'@'localhost' IDENTIFIED BY '{$dbPassword}';"
+                "CREATE USER '{$dbUser}'@'localhost' IDENTIFIED BY '{$dbPassword}';",
+                $rootPassword
             );
             
             if (!$result['success']) {
@@ -54,7 +66,8 @@ class CreateDatabaseJob implements ShouldQueue
 
             // Grant privileges
             $result = $ssh->executeMysql(
-                "GRANT ALL PRIVILEGES ON `{$dbName}`.* TO '{$dbUser}'@'localhost';"
+                "GRANT ALL PRIVILEGES ON `{$dbName}`.* TO '{$dbUser}'@'localhost';",
+                $rootPassword
             );
             
             if (!$result['success']) {
@@ -62,14 +75,14 @@ class CreateDatabaseJob implements ShouldQueue
             }
 
             // Flush privileges
-            $result = $ssh->executeMysql("FLUSH PRIVILEGES;");
+            $result = $ssh->executeMysql("FLUSH PRIVILEGES;", $rootPassword);
             
             if (!$result['success']) {
                 throw new \Exception('Failed to flush privileges: ' . $result['output']);
             }
 
             // Store credentials (encrypted automatically by model)
-            $this->site->update([
+            $site->update([
                 'db_name' => $dbName,
                 'db_username' => $dbUser,
                 'db_password' => $dbPassword,
@@ -78,7 +91,7 @@ class CreateDatabaseJob implements ShouldQueue
             $log->markAsCompleted("Database created: {$dbName}");
         } catch (\Exception $e) {
             $log->markAsFailed($e->getMessage());
-            $this->site->markAsFailed();
+            $site->markAsFailed();
             $this->fail($e);
         }
     }

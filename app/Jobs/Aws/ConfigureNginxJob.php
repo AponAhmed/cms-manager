@@ -17,43 +17,58 @@ class ConfigureNginxJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public function __construct(
-        private Site $site
+        private int $siteId
     ) {}
 
-    public function handle(SshService $ssh): void
+    public function handle(): void
     {
+        $site = Site::find($this->siteId);
+        
+        if (!$site) {
+            return;
+        }
+
         $log = ProvisionLog::create([
-            'site_id' => $this->site->id,
+            'site_id' => $site->id,
             'step' => ProvisionLog::STEP_CONFIGURE_NGINX,
             'status' => ProvisionLog::STATUS_RUNNING,
         ]);
 
         try {
+            $ssh = new SshService($site);
+            
+            // Determine server_name - use both public IP and domain
+            $skipDns = config('provisioning.aws.skip_dns', true);
+            $serverName = $skipDns 
+                ? $site->public_ip 
+                : "{$site->domain} {$site->public_ip}";
+            
             // Generate Nginx config from template
             $config = View::make('templates.nginx-vhost', [
-                'domain' => $this->site->domain,
-                'root_path' => $this->site->ec2_path . '/public',
-                'logs_path' => $this->site->ec2_path . '/logs',
-                'php_fpm_socket' => config('wordpress.paths.php_fpm_socket'),
+                'domain' => $site->domain,
+                'server_name' => $serverName,
+                'root_path' => $site->ec2_path . '/public',
+                'logs_path' => $site->ec2_path . '/logs',
+                'php_fpm_socket' => config('aws.wordpress.paths.php_fpm_socket'),
             ])->render();
 
-            // Upload config to sites-available
-            $availablePath = config('wordpress.paths.nginx_available') . '/' . $this->site->domain . '.conf';
-            $uploadResult = $ssh->uploadContent($config, "/tmp/{$this->site->domain}.conf");
+            // Upload config to temp
+            $uploadResult = $ssh->uploadContent($config, "/tmp/{$site->domain}.conf");
             
             if (!$uploadResult) {
                 throw new \Exception('Failed to upload Nginx config');
             }
 
             // Move to sites-available with sudo
-            $result = $ssh->execute("sudo mv /tmp/{$this->site->domain}.conf {$availablePath}");
+            $availablePath = config('aws.wordpress.paths.nginx_available') . '/' . $site->domain . '.conf';
+            $result = $ssh->execute("sudo mv /tmp/{$site->domain}.conf {$availablePath}");
             
             if (!$result['success']) {
                 throw new \Exception('Failed to move config to sites-available: ' . $result['output']);
             }
 
             // Create symlink to sites-enabled
-            $enabledPath = config('wordpress.paths.nginx_enabled') . '/' . $this->site->domain . '.conf';
+            $enabledPath = config('aws.wordpress.paths.nginx_enabled') . '/' . $site->domain . '.conf';
             $result = $ssh->execute("sudo ln -sf {$availablePath} {$enabledPath}");
             
             if (!$result['success']) {
@@ -67,10 +82,17 @@ class ConfigureNginxJob implements ShouldQueue
                 throw new \Exception('Nginx configuration test failed: ' . $result['output']);
             }
 
-            $log->markAsCompleted('Nginx virtual host configured');
+            // Reload Nginx
+            $result = $ssh->reloadNginx();
+            
+            if (!$result['success']) {
+                throw new \Exception('Failed to reload Nginx: ' . $result['output']);
+            }
+
+            $log->markAsCompleted('Nginx virtual host configured and reloaded');
         } catch (\Exception $e) {
             $log->markAsFailed($e->getMessage());
-            $this->site->markAsFailed();
+            $site->markAsFailed();
             $this->fail($e);
         }
     }

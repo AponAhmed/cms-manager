@@ -4,7 +4,6 @@ namespace App\Jobs\Aws;
 
 use App\Models\ProvisionLog;
 use App\Models\Site;
-use App\Services\Aws\Route53Service;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -16,26 +15,32 @@ class ValidateDomainJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public function __construct(
-        private Site $site
+        private int $siteId
     ) {}
 
     public function handle(): void
     {
+        $site = Site::find($this->siteId);
+        
+        if (!$site) {
+            return;
+        }
+
         $log = ProvisionLog::create([
-            'site_id' => $this->site->id,
+            'site_id' => $site->id,
             'step' => ProvisionLog::STEP_VALIDATE_DOMAIN,
             'status' => ProvisionLog::STATUS_RUNNING,
         ]);
 
         try {
-            // Validate domain format
-            if (!Route53Service::isValidDomain($this->site->domain)) {
+            // Validate domain format (basic check)
+            if (!$this->isValidDomain($site->domain)) {
                 throw new \Exception('Invalid domain format');
             }
 
             // Check if domain already exists in our system
-            $existingSite = Site::where('domain', $this->site->domain)
-                ->where('id', '!=', $this->site->id)
+            $existingSite = Site::where('domain', $site->domain)
+                ->where('id', '!=', $site->id)
                 ->where('status', '!=', Site::STATUS_DESTROYED)
                 ->first();
 
@@ -43,17 +48,23 @@ class ValidateDomainJob implements ShouldQueue
                 throw new \Exception('Domain already exists in the system');
             }
 
-            // Check if DNS record already exists
-            $route53 = new Route53Service();
-            if ($route53->recordExists($this->site->domain)) {
-                throw new \Exception('DNS record already exists for this domain');
-            }
-
-            $log->markAsCompleted("Domain validation successful for: {$this->site->domain}");
+            $log->markAsCompleted("Domain validation successful for: {$site->domain}");
         } catch (\Exception $e) {
             $log->markAsFailed($e->getMessage());
-            $this->site->markAsFailed();
+            $site->markAsFailed();
             $this->fail($e);
         }
+    }
+
+    /**
+     * Validate domain format
+     */
+    private function isValidDomain(string $domain): bool
+    {
+        // More permissive regex that accepts domains like "example.com", "test.io", "sub.domain.test"
+        return (bool) preg_match(
+            '/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/i',
+            $domain
+        );
     }
 }

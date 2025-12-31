@@ -2,7 +2,6 @@
 
 namespace App\Jobs\Aws;
 
-use App\Models\Configuration;
 use App\Models\ProvisionLog;
 use App\Models\Site;
 use App\Services\Aws\Route53Service;
@@ -17,57 +16,66 @@ class UpdateDnsJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public function __construct(
-        private Site $site
+        private int $siteId
     ) {}
 
-    public function handle(Route53Service $route53): void
+    public function handle(): void
     {
+        $site = Site::find($this->siteId);
+        
+        if (!$site) {
+            return;
+        }
+
         $log = ProvisionLog::create([
-            'site_id' => $this->site->id,
+            'site_id' => $site->id,
             'step' => ProvisionLog::STEP_UPDATE_DNS,
             'status' => ProvisionLog::STATUS_RUNNING,
         ]);
 
         try {
-            // Get EC2 public IP
-            $publicIp = Configuration::get(
-                Configuration::KEY_EC2_PUBLIC_IP,
-                config('wordpress.ec2.ip')
-            );
+            // Check if DNS should be skipped (local testing mode)
+            $skipDns = config('provisioning.aws.skip_dns', true);
+            $hostedZoneId = config('aws.route53.hosted_zone_id');
 
-            if (!$publicIp) {
-                throw new \Exception('EC2 public IP not configured');
+            if ($skipDns || empty($hostedZoneId)) {
+                $log->markAsCompleted(
+                    "DNS update skipped (using EC2 public IP).\n" .
+                    "Access site at: http://{$site->public_ip}"
+                );
+                return;
             }
 
-            // Create A record
+            // Create Route53 A record
+            $route53 = new Route53Service();
+            
             $changeId = $route53->createARecord(
-                $this->site->domain,
-                $publicIp,
-                config('wordpress.dns.ttl', 300)
+                $site->domain,
+                $site->public_ip,
+                config('aws.route53.ttl', 300)
             );
 
             if (!$changeId) {
                 throw new \Exception('Failed to create DNS record');
             }
 
-            // Update site with IP and change ID
-            $this->site->update([
-                'public_ip' => $publicIp,
+            // Update site with change ID
+            $site->update([
                 'dns_record_id' => $changeId,
             ]);
 
-            // Wait for DNS propagation (optional, can be time-consuming)
-            $maxAttempts = config('wordpress.dns.max_wait_attempts', 30);
+            // Wait for DNS propagation (optional)
+            $maxAttempts = config('aws.route53.max_wait_attempts', 30);
             $propagated = $route53->waitForChange($changeId, $maxAttempts);
 
             if ($propagated) {
-                $log->markAsCompleted("DNS A record created and propagated: {$this->site->domain} -> {$publicIp}");
+                $log->markAsCompleted("DNS A record created and propagated: {$site->domain} -> {$site->public_ip}");
             } else {
-                $log->markAsCompleted("DNS A record created (propagation pending): {$this->site->domain} -> {$publicIp}");
+                $log->markAsCompleted("DNS A record created (propagation pending): {$site->domain} -> {$site->public_ip}");
             }
         } catch (\Exception $e) {
             $log->markAsFailed($e->getMessage());
-            $this->site->markAsFailed();
+            $site->markAsFailed();
             $this->fail($e);
         }
     }

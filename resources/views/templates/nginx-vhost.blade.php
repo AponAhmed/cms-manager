@@ -1,6 +1,6 @@
 server {
     listen 80;
-    server_name {{ $domain }};
+    server_name {{ $server_name ?? $domain }};
     
     root {{ $root_path }};
     index index.php index.html;

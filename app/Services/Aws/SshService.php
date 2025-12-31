@@ -2,22 +2,33 @@
 
 namespace App\Services\Aws;
 
-use App\Models\Configuration;
+use App\Models\Site;
 use phpseclib3\Net\SSH2;
 use phpseclib3\Crypt\PublicKeyLoader;
 
 class SshService
 {
-    private SSH2 $connection;
+    private ?SSH2 $connection = null;
     private string $host;
     private string $user;
-    private string $keyPath;
+    private string $privateKey;
 
-    public function __construct()
+    /**
+     * Create SSH service for a specific site
+     */
+    public function __construct(Site $site)
     {
-        $this->host = Configuration::get(Configuration::KEY_EC2_PUBLIC_IP, config('wordpress.ec2.ip'));
-        $this->user = Configuration::get(Configuration::KEY_EC2_SSH_USER, config('wordpress.ec2.ssh_user'));
-        $this->keyPath = Configuration::get(Configuration::KEY_EC2_SSH_KEY_PATH, config('wordpress.ec2.ssh_key'));
+        if (!$site->public_ip) {
+            throw new \Exception("Site does not have a public IP address");
+        }
+
+        if (!$site->private_key) {
+            throw new \Exception("Site does not have an SSH private key");
+        }
+
+        $this->host = $site->public_ip;
+        $this->user = config('aws.ssh.user', 'ec2-user');
+        $this->privateKey = $site->private_key;
     }
 
     /**
@@ -25,21 +36,18 @@ class SshService
      */
     public function connect(): void
     {
-        if (isset($this->connection) && $this->connection->isConnected()) {
+        if ($this->connection !== null && $this->connection->isConnected()) {
             return;
         }
 
-        $this->connection = new SSH2($this->host);
+        $timeout = config('aws.ssh.connection_timeout', 30);
+        $this->connection = new SSH2($this->host, 22, $timeout);
 
-        // Load private key
-        if (!file_exists($this->keyPath)) {
-            throw new \Exception("SSH key not found at: {$this->keyPath}");
-        }
-
-        $key = PublicKeyLoader::load(file_get_contents($this->keyPath));
+        // Load private key from string
+        $key = PublicKeyLoader::load($this->privateKey);
 
         if (!$this->connection->login($this->user, $key)) {
-            throw new \Exception('SSH login failed');
+            throw new \Exception("SSH login failed to {$this->host}");
         }
     }
 
@@ -83,13 +91,8 @@ class SshService
     /**
      * Execute MySQL command
      */
-    public function executeMysql(string $sql): array
+    public function executeMysql(string $sql, string $rootPassword): array
     {
-        $rootPassword = Configuration::get(
-            Configuration::KEY_MYSQL_ROOT_PASSWORD,
-            config('wordpress.mysql.root_password')
-        );
-
         $command = sprintf(
             'mysql -u root -p%s -e %s',
             escapeshellarg($rootPassword),
@@ -97,22 +100,6 @@ class SshService
         );
 
         return $this->execute($command);
-    }
-
-    /**
-     * Upload a file to the remote server
-     */
-    public function uploadFile(string $localPath, string $remotePath): bool
-    {
-        $this->connect();
-
-        if (!file_exists($localPath)) {
-            throw new \Exception("Local file not found: {$localPath}");
-        }
-
-        $content = file_get_contents($localPath);
-        
-        return $this->connection->put($remotePath, $content);
     }
 
     /**
@@ -148,7 +135,7 @@ class SshService
     /**
      * Create a directory on remote server
      */
-    public function createDirectory(string $path, string $owner = 'www-data:www-data', string $permissions = '755'): array
+    public function createDirectory(string $path, string $owner = 'nginx:nginx', string $permissions = '755'): array
     {
         $commands = [
             "sudo mkdir -p {$path}",
@@ -212,8 +199,9 @@ class SshService
      */
     public function disconnect(): void
     {
-        if (isset($this->connection)) {
+        if ($this->connection !== null) {
             $this->connection->disconnect();
+            $this->connection = null;
         }
     }
 

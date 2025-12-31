@@ -24,11 +24,19 @@ class Site extends Model
         'dns_record_id',
         'provisioned_at',
         'destroyed_at',
+        // EC2 instance fields
+        'instance_id',
+        'key_pair_name',
+        'private_key',
+        'security_group_id',
+        'mysql_root_password',
     ];
 
     protected $casts = [
         'wp_admin_password' => 'encrypted',
         'db_password' => 'encrypted',
+        'private_key' => 'encrypted',
+        'mysql_root_password' => 'encrypted',
         'provisioned_at' => 'datetime',
         'destroyed_at' => 'datetime',
     ];

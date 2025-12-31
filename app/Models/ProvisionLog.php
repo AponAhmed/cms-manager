@@ -29,6 +29,7 @@ class ProvisionLog extends Model
     /**
      * Step constants (matches job names)
      */
+    const STEP_LAUNCH_INSTANCE = 'launch_instance';
     const STEP_VALIDATE_DOMAIN = 'validate_domain';
     const STEP_PREPARE_FILESYSTEM = 'prepare_filesystem';
     const STEP_CREATE_DATABASE = 'create_database';
@@ -45,6 +46,7 @@ class ProvisionLog extends Model
     const STEP_DELETE_FILES = 'delete_files';
     const STEP_DROP_DATABASE = 'drop_database';
     const STEP_DELETE_DNS = 'delete_dns';
+    const STEP_TERMINATE_INSTANCE = 'terminate_instance';
 
     /**
      * Get the site this log belongs to
@@ -114,6 +116,7 @@ class ProvisionLog extends Model
     public function getStepDisplayNameAttribute(): string
     {
         return match ($this->step) {
+            self::STEP_LAUNCH_INSTANCE => 'Launch EC2 Instance',
             self::STEP_VALIDATE_DOMAIN => 'Validate Domain',
             self::STEP_PREPARE_FILESYSTEM => 'Prepare Filesystem',
             self::STEP_CREATE_DATABASE => 'Create Database',
@@ -126,6 +129,7 @@ class ProvisionLog extends Model
             self::STEP_DELETE_FILES => 'Delete Files',
             self::STEP_DROP_DATABASE => 'Drop Database',
             self::STEP_DELETE_DNS => 'Delete DNS Record',
+            self::STEP_TERMINATE_INSTANCE => 'Terminate EC2 Instance',
             default => ucwords(str_replace('_', ' ', $this->step)),
         };
     }

@@ -4,8 +4,8 @@ namespace App\Jobs\Aws;
 
 use App\Models\ProvisionLog;
 use App\Models\Site;
-use App\Services\Route53Service;
-use App\Services\Aws\SshService;
+use App\Services\Aws\Ec2Service;
+use App\Services\Aws\Route53Service;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -17,163 +17,97 @@ class DestroyWordPressSite implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public function __construct(
-        private Site $site
+        private int $siteId
     ) {}
 
-    public function handle(SshService $ssh, Route53Service $route53): void
+    public function handle(): void
     {
-        // Step 1: Remove Nginx configuration
-        $this->removeNginxConfig($ssh);
+        $site = Site::find($this->siteId);
+        
+        if (!$site) {
+            return;
+        }
 
-        // Step 2: Reload Nginx
-        $this->reloadNginx($ssh);
+        // Step 1: Terminate EC2 instance
+        $this->terminateInstance($site);
 
-        // Step 3: Delete WordPress files
-        $this->deleteWordPressFiles($ssh);
+        // Step 2: Delete key pair
+        $this->deleteKeyPair($site);
 
-        // Step 4: Drop database and user
-        $this->dropDatabase($ssh);
-
-        // Step 5: Delete DNS record
-        $this->deleteDnsRecord($route53);
+        // Step 3: Delete DNS record (if exists)
+        $this->deleteDnsRecord($site);
 
         // Mark site as destroyed
-        $this->site->markAsDestroyed();
+        $site->markAsDestroyed();
     }
 
-    private function removeNginxConfig(SshService $ssh): void
+    private function terminateInstance(Site $site): void
     {
         $log = ProvisionLog::create([
-            'site_id' => $this->site->id,
-            'step' => ProvisionLog::STEP_REMOVE_NGINX,
+            'site_id' => $site->id,
+            'step' => ProvisionLog::STEP_TERMINATE_INSTANCE,
             'status' => ProvisionLog::STATUS_RUNNING,
         ]);
 
         try {
-            $enabledPath = config('wordpress.paths.nginx_enabled') . '/' . $this->site->domain . '.conf';
-            $availablePath = config('wordpress.paths.nginx_available') . '/' . $this->site->domain . '.conf';
-
-            // Remove symlink
-            $ssh->deleteFile($enabledPath);
-
-            // Remove config file
-            $ssh->deleteFile($availablePath);
-
-            $log->markAsCompleted('Nginx configuration removed');
-        } catch (\Exception $e) {
-            $log->markAsFailed($e->getMessage());
-            throw $e;
-        }
-    }
-
-    private function reloadNginx(SshService $ssh): void
-    {
-        $log = ProvisionLog::create([
-            'site_id' => $this->site->id,
-            'step' => ProvisionLog::STEP_RELOAD_NGINX,
-            'status' => ProvisionLog::STATUS_RUNNING,
-        ]);
-
-        try {
-            $result = $ssh->reloadNginx();
-
-            if (!$result['success']) {
-                // Log warning but don't fail the cleanup
-                $log->markAsCompleted('Nginx reload failed (non-critical): ' . $result['output']);
-            } else {
-                $log->markAsCompleted('Nginx reloaded');
+            if (!$site->instance_id) {
+                $log->markAsCompleted('No EC2 instance to terminate');
+                return;
             }
+
+            $ec2 = new Ec2Service();
+            $ec2->terminateInstance($site->instance_id);
+
+            $log->markAsCompleted("EC2 instance terminated: {$site->instance_id}");
         } catch (\Exception $e) {
-            $log->markAsCompleted('Nginx reload error (non-critical): ' . $e->getMessage());
+            // Log but don't fail - we want to continue cleanup
+            $log->markAsCompleted("Failed to terminate instance (non-critical): {$e->getMessage()}");
         }
     }
 
-    private function deleteWordPressFiles(SshService $ssh): void
+    private function deleteKeyPair(Site $site): void
     {
-        $log = ProvisionLog::create([
-            'site_id' => $this->site->id,
-            'step' => ProvisionLog::STEP_DELETE_FILES,
-            'status' => ProvisionLog::STATUS_RUNNING,
-        ]);
-
         try {
-            if ($this->site->ec2_path) {
-                $result = $ssh->deleteDirectory($this->site->ec2_path);
-
-                if (!$result['success']) {
-                    throw new \Exception('Failed to delete files: ' . $result['output']);
-                }
-
-                $log->markAsCompleted("Deleted directory: {$this->site->ec2_path}");
-            } else {
-                $log->markAsCompleted('No filesystem path to delete');
+            if (!$site->key_pair_name) {
+                return;
             }
+
+            $ec2 = new Ec2Service();
+            $ec2->deleteKeyPair($site->key_pair_name);
         } catch (\Exception $e) {
-            $log->markAsFailed($e->getMessage());
-            throw $e;
+            // Ignore errors - key pair deletion is best effort
         }
     }
 
-    private function dropDatabase(SshService $ssh): void
+    private function deleteDnsRecord(Site $site): void
     {
         $log = ProvisionLog::create([
-            'site_id' => $this->site->id,
-            'step' => ProvisionLog::STEP_DROP_DATABASE,
-            'status' => ProvisionLog::STATUS_RUNNING,
-        ]);
-
-        try {
-            if ($this->site->db_name && $this->site->db_username) {
-                // Drop database
-                $result = $ssh->executeMysql("DROP DATABASE IF EXISTS `{$this->site->db_name}`;");
-
-                if (!$result['success']) {
-                    throw new \Exception('Failed to drop database: ' . $result['output']);
-                }
-
-                // Drop user
-                $result = $ssh->executeMysql("DROP USER IF EXISTS '{$this->site->db_username}'@'localhost';");
-
-                if (!$result['success']) {
-                    throw new \Exception('Failed to drop user: ' . $result['output']);
-                }
-
-                // Flush privileges
-                $ssh->executeMysql("FLUSH PRIVILEGES;");
-
-                $log->markAsCompleted("Dropped database: {$this->site->db_name} and user: {$this->site->db_username}");
-            } else {
-                $log->markAsCompleted('No database to drop');
-            }
-        } catch (\Exception $e) {
-            $log->markAsFailed($e->getMessage());
-            throw $e;
-        }
-    }
-
-    private function deleteDnsRecord(Route53Service $route53): void
-    {
-        $log = ProvisionLog::create([
-            'site_id' => $this->site->id,
+            'site_id' => $site->id,
             'step' => ProvisionLog::STEP_DELETE_DNS,
             'status' => ProvisionLog::STATUS_RUNNING,
         ]);
 
         try {
-            if ($this->site->public_ip && $this->site->domain) {
-                $result = $route53->deleteRecord($this->site->domain, $this->site->public_ip);
+            // Skip if DNS was never configured
+            $skipDns = config('provisioning.aws.skip_dns', true);
+            $hostedZoneId = config('aws.route53.hosted_zone_id');
 
-                if ($result) {
-                    $log->markAsCompleted("Deleted DNS record for: {$this->site->domain}");
-                } else {
-                    $log->markAsCompleted('DNS record not found or already deleted');
-                }
+            if ($skipDns || empty($hostedZoneId) || !$site->public_ip) {
+                $log->markAsCompleted('No DNS record to delete (DNS was not configured)');
+                return;
+            }
+
+            $route53 = new Route53Service();
+            $result = $route53->deleteRecord($site->domain, $site->public_ip);
+
+            if ($result) {
+                $log->markAsCompleted("Deleted DNS record for: {$site->domain}");
             } else {
-                $log->markAsCompleted('No DNS record to delete');
+                $log->markAsCompleted('DNS record not found or already deleted');
             }
         } catch (\Exception $e) {
-            // Log warning but don't fail the cleanup
-            $log->markAsCompleted('DNS deletion error (non-critical): ' . $e->getMessage());
+            // Log but don't fail cleanup
+            $log->markAsCompleted("DNS deletion error (non-critical): {$e->getMessage()}");
         }
     }
 }

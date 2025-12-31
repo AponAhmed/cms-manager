@@ -55,7 +55,7 @@ class ProvisionWordPressSite implements ShouldQueue
             new Local\CreateDatabaseJob($site->id),
             new Local\InstallWordPressJob($site->id),
             new Local\ConfigureNginxJob($site->id),
-            new ReloadNginxJob($site->id), // Same for both modes
+            new ReloadNginxJob($site->id),
             new Local\UpdateHostsJob($site->id),
             new Local\VerifySiteJob($site->id),
         ];
@@ -64,14 +64,21 @@ class ProvisionWordPressSite implements ShouldQueue
     private function getAwsJobs(Site $site): array
     {
         return [
-            new Aws\ValidateDomainJob($site),
-            new Aws\PrepareFilesystemJob($site),
-            new Aws\CreateDatabaseJob($site),
-            new Aws\InstallWordPressJob($site),
-            new Aws\ConfigureNginxJob($site),
-            new ReloadNginxJob($site->id),
-            new Aws\UpdateDnsJob($site),
-            new Aws\VerifySiteJob($site),
+            // Phase 1: Launch EC2 instance (this creates the server)
+            new Aws\LaunchEc2InstanceJob($site->id),
+            
+            // Phase 2: Validate and prepare
+            new Aws\ValidateDomainJob($site->id),
+            new Aws\PrepareFilesystemJob($site->id),
+            
+            // Phase 3: Database and WordPress
+            new Aws\CreateDatabaseJob($site->id),
+            new Aws\InstallWordPressJob($site->id),
+            
+            // Phase 4: Configure and verify
+            new Aws\ConfigureNginxJob($site->id),
+            new Aws\UpdateDnsJob($site->id),
+            new Aws\VerifySiteJob($site->id),
         ];
     }
 }
